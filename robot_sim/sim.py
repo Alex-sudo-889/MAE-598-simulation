@@ -125,12 +125,23 @@ def load_default_scene() -> Tuple[World, List[Robot], List[Obstacle], List[Targe
     if DEFAULT_SCENE_PATH.exists():
         return load_scene(DEFAULT_SCENE_PATH)
     # fallback simple layout if file missing
-    world = World(40.0, 1040.0, 40.0, 680.0)
+    world = World(40.0, 1840.0, 40.0, 1240.0)
     robots = [
-        Robot(pos=_np_point([120.0, 160.0])),
-        Robot(pos=_np_point([180.0, 520.0])),
+        Robot(pos=_np_point([200.0, 260.0]), coverage_radius=140.0),
+        Robot(pos=_np_point([240.0, 620.0]), coverage_radius=140.0),
+        Robot(pos=_np_point([200.0, 980.0]), coverage_radius=140.0),
     ]
-    obstacles = [Obstacle(c=_np_point([520.0, 360.0]), R=70.0)]
+    obstacles = [
+        Obstacle(c=_np_point([640.0, 360.0]), R=120.0),
+        Obstacle(c=_np_point([980.0, 320.0]), R=80.0),
+        Obstacle(c=_np_point([1340.0, 260.0]), R=110.0),
+        Obstacle(c=_np_point([520.0, 760.0]), R=90.0),
+        Obstacle(c=_np_point([960.0, 780.0]), R=130.0),
+        Obstacle(c=_np_point([1380.0, 900.0]), R=70.0),
+        Obstacle(c=_np_point([720.0, 1100.0]), R=120.0),
+        Obstacle(c=_np_point([1150.0, 1080.0]), R=85.0),
+        Obstacle(c=_np_point([1520.0, 640.0]), R=140.0),
+    ]
     targets: List[Target] = []
     return world, robots, obstacles, targets
 
@@ -209,14 +220,20 @@ class Simulator:
         dragging_robot = None
         if self.drag_state and self.drag_state.kind == "robot":
             dragging_robot = self.drag_state.index
+        velocities: List[np.ndarray] = []
         for idx, robot in enumerate(self.robots):
             if dragging_robot is not None and idx == dragging_robot:
+                velocities.append(np.zeros(2))
                 continue
             velocity = controls.compute_velocity(
                 robot, idx, self.robots, self.world, self.obstacles, self.targets
             )
             limited = controls.clip_speed(velocity, robot.vmax)
-            robot.pos = self._clamp_position(robot.pos + limited * dt, robot.r)
+            velocities.append(limited)
+        for idx, robot in enumerate(self.robots):
+            if dragging_robot is not None and idx == dragging_robot:
+                continue
+            robot.pos = self._clamp_position(robot.pos + velocities[idx] * dt, robot.r)
             robot.trail.append(tuple(robot.pos))
 
     def _clamp_position(self, pos: np.ndarray, radius: float) -> np.ndarray:

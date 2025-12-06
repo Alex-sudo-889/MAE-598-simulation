@@ -4,6 +4,7 @@ import ast
 import configparser
 import json
 import math
+import os
 import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -17,6 +18,20 @@ if TYPE_CHECKING:
 
 CONFIG_PATH = Path(__file__).with_name("term_math.cfg")
 COMPILED_JSON_PATH = Path(__file__).with_name("term_config.json")
+
+_DEFAULT_CONTROLLER_MODE = (
+    os.environ.get("ROBOT_CONTROLLER_MODE", "voronoi").strip().lower()
+)
+if _DEFAULT_CONTROLLER_MODE not in {"voronoi", "terms"}:
+    _DEFAULT_CONTROLLER_MODE = "voronoi"
+
+_VORONOI_GAIN = float(os.environ.get("ROBOT_VORONOI_GAIN", "1.2"))
+_VORONOI_RESOLUTION = float(os.environ.get("ROBOT_VORONOI_RESOLUTION", "24.0"))
+_VORONOI_DENSITY_SIGMA = float(os.environ.get("ROBOT_VORONOI_SIGMA", "220.0"))
+_VORONOI_OBS_MARGIN = float(os.environ.get("ROBOT_VORONOI_OBS_MARGIN", "6.0"))
+_VORONOI_LINK_GAIN = float(os.environ.get("ROBOT_VORONOI_LINK_GAIN", "1.4"))
+_VORONOI_LINK_RANGE = float(os.environ.get("ROBOT_VORONOI_LINK_RANGE", "0.0"))
+_VORONOI_OVERLAP_MARGIN = float(os.environ.get("ROBOT_VORONOI_OVERLAP", "20.0"))
 
 SAFE_FUNCTIONS = {
     name: getattr(math, name)
@@ -156,6 +171,15 @@ _config_state: Dict[str, object] = {
     "last_json_loaded": None,
 }
 
+_controller_mode: str = _DEFAULT_CONTROLLER_MODE
+_voronoi_samples_cache: Dict[str, object] = {
+    "bounds": None,
+    "resolution": None,
+    "points": None,
+}
+_voronoi_velocity_cache_key: Optional[Tuple[object, ...]] = None
+_voronoi_velocity_cache: List[np.ndarray] = []
+
 
 def iter_terms() -> Iterable[Tuple[str, TermInfo]]:
     return _registry.items()
@@ -192,6 +216,30 @@ def set_term_active(name: str, active: bool) -> None:
         info.active = active
 
 
+def get_controller_mode() -> str:
+    return _controller_mode
+
+
+def set_controller_mode(mode: str) -> None:
+    global _controller_mode
+    normalized = mode.strip().lower()
+    if normalized not in {"voronoi", "terms"}:
+        return
+    if normalized != _controller_mode:
+        _controller_mode = normalized
+        _invalidate_voronoi_cache()
+
+
+def _use_voronoi_controller() -> bool:
+    return _controller_mode == "voronoi"
+
+
+def _invalidate_voronoi_cache() -> None:
+    global _voronoi_velocity_cache_key, _voronoi_velocity_cache
+    _voronoi_velocity_cache_key = None
+    _voronoi_velocity_cache = []
+
+
 def compute_velocity(
     robot: Robot,
     idx: int,
@@ -200,6 +248,11 @@ def compute_velocity(
     obstacles: List[Obstacle],
     targets: List[Target],
 ) -> np.ndarray:
+    if _use_voronoi_controller():
+        velocities = _get_cached_voronoi_velocities(robots, world, obstacles, targets)
+        if 0 <= idx < len(velocities):
+            return velocities[idx]
+        return np.zeros(2)
     total = np.zeros(2)
     _config_state["runtime_error"] = None
     chain_links = _build_chain_links(robots)
@@ -222,6 +275,301 @@ def clip_speed(v: np.ndarray, vmax: float) -> np.ndarray:
     if norm == 0 or norm <= vmax:
         return v
     return v * (vmax / norm)
+
+
+def _get_cached_voronoi_velocities(
+    robots: List[Robot],
+    world: World,
+    obstacles: List[Obstacle],
+    targets: List[Target],
+) -> List[np.ndarray]:
+    global _voronoi_velocity_cache_key, _voronoi_velocity_cache
+    key = _make_voronoi_cache_key(robots, world, obstacles, targets)
+    if key != _voronoi_velocity_cache_key:
+        _voronoi_velocity_cache = _compute_voronoi_velocities(
+            robots, world, obstacles, targets
+        )
+        _voronoi_velocity_cache_key = key
+    return _voronoi_velocity_cache
+
+
+def _make_voronoi_cache_key(
+    robots: List[Robot],
+    world: World,
+    obstacles: List[Obstacle],
+    targets: List[Target],
+) -> Tuple[object, ...]:
+    robot_key = tuple((float(robot.pos[0]), float(robot.pos[1])) for robot in robots)
+    obstacle_key = tuple(
+        (float(obstacle.c[0]), float(obstacle.c[1]), float(obstacle.R))
+        for obstacle in obstacles
+    )
+    target_key = tuple(
+        (float(target.pos[0]), float(target.pos[1])) for target in targets
+    )
+    world_key = (
+        float(world.xmin),
+        float(world.xmax),
+        float(world.ymin),
+        float(world.ymax),
+    )
+    return (robot_key, obstacle_key, target_key, world_key, _controller_mode)
+
+
+def _compute_voronoi_velocities(
+    robots: List[Robot],
+    world: World,
+    obstacles: List[Obstacle],
+    targets: List[Target],
+) -> List[np.ndarray]:
+    if not robots:
+        return []
+    points = _ensure_sample_points(world, _VORONOI_RESOLUTION)
+    if points.size == 0:
+        return [np.zeros(2) for _ in robots]
+    mask = _filter_points_by_obstacles(points, obstacles)
+    valid_points = points[mask]
+    if valid_points.size == 0:
+        return [np.zeros(2) for _ in robots]
+    importance = _importance_density(valid_points, targets)
+    cell_weight = max(_VORONOI_RESOLUTION, 1.0) ** 2
+    weights = importance * cell_weight
+    robot_positions = np.array([np.array(robot.pos, dtype=float) for robot in robots])
+    diffs = valid_points[:, None, :] - robot_positions[None, :, :]
+    dists_sq = np.sum(diffs * diffs, axis=2)
+    ownership = np.argmin(dists_sq, axis=1)
+    accum = np.zeros_like(robot_positions)
+    total_weight = np.zeros(len(robots))
+    for idx, robot_idx in enumerate(ownership):
+        w = weights[idx]
+        accum[robot_idx] += valid_points[idx] * w
+        total_weight[robot_idx] += w
+    velocities: List[np.ndarray] = []
+    for idx, pos in enumerate(robot_positions):
+        if total_weight[idx] > 1e-6:
+            centroid = accum[idx] / total_weight[idx]
+        else:
+            centroid = pos
+        velocities.append(_VORONOI_GAIN * (centroid - pos))
+    _apply_connectivity_links(velocities, robots, robot_positions)
+    return velocities
+
+
+def _apply_connectivity_links(
+    velocities: List[np.ndarray], robots: List[Robot], positions: np.ndarray
+) -> None:
+    if len(velocities) != len(robots) or len(robots) < 2:
+        return
+    gain = max(_VORONOI_LINK_GAIN, 0.0)
+    if gain <= 0.0:
+        return
+    coverage = np.array(
+        [float(getattr(robot, "coverage_radius", robot.r)) for robot in robots]
+    )
+    base_range = max(_VORONOI_LINK_RANGE, 0.0)
+    overlap = max(_VORONOI_OVERLAP_MARGIN, 0.0)
+    chain_links = _build_chain_links(robots)
+    neighbor_sets: List[Set[int]] = [set() for _ in robots]
+    limit_maps: List[Dict[int, float]] = [dict() for _ in robots]
+
+    def add_link(i: int, j: int) -> None:
+        if i == j:
+            return
+        allowed = _link_limit(i, j, coverage, base_range, overlap)
+        if allowed <= 0.0:
+            return
+        neighbor_sets[i].add(j)
+        neighbor_sets[j].add(i)
+        limit_maps[i][j] = allowed
+        limit_maps[j][i] = allowed
+
+    for idx, linked in chain_links.items():
+        for neighbor_idx in linked:
+            add_link(idx, neighbor_idx)
+
+    _ensure_base_connectivity(
+        neighbor_sets, limit_maps, coverage, base_range, overlap, positions
+    )
+
+    neighbor_lists: List[List[int]] = []
+    limit_lists: List[List[float]] = []
+    for idx in range(len(robots)):
+        linked = sorted(neighbor_sets[idx])
+        neighbor_lists.append(linked)
+        limit_lists.append([limit_maps[idx][nbr] for nbr in linked])
+
+    _project_link_constraints(velocities, positions, neighbor_lists, limit_lists, gain)
+
+
+
+def _project_link_constraints(
+    velocities: List[np.ndarray],
+    positions: np.ndarray,
+    neighbors: List[List[int]],
+    limits: List[List[float]],
+    gain: float,
+) -> None:
+    dt = 1.0
+    eps = 1e-6
+    max_iters = 8
+    for _ in range(max_iters):
+        any_violation = False
+        for idx, linked in enumerate(neighbors):
+            for entry_idx, neighbor_idx in enumerate(linked):
+                allowed = limits[idx][entry_idx]
+                if allowed <= 0.0:
+                    continue
+                rel_pos = positions[idx] - positions[neighbor_idx]
+                dist = float(np.linalg.norm(rel_pos))
+                if dist <= eps:
+                    continue
+                rel_vel = velocities[idx] - velocities[neighbor_idx]
+                rel_next = rel_pos + rel_vel * dt
+                next_dist = float(np.linalg.norm(rel_next))
+                if next_dist <= allowed:
+                    continue
+                any_violation = True
+                correction_dir = rel_next / (next_dist + eps)
+                excess = next_dist - allowed
+                impulse = correction_dir * excess * 0.5 * gain
+                velocities[idx] -= impulse / dt
+                velocities[neighbor_idx] += impulse / dt
+        if not any_violation:
+            break
+
+def _link_limit(
+    idx: int,
+    neighbor_idx: int,
+    coverage: np.ndarray,
+    base_range: float,
+    overlap: float,
+) -> float:
+    allowed = max(coverage[idx] + coverage[neighbor_idx] - overlap, 0.0)
+    if base_range > 0.0:
+        allowed = min(allowed, base_range)
+    return allowed
+
+
+def _ensure_base_connectivity(
+    neighbor_sets: List[Set[int]],
+    limit_maps: List[Dict[int, float]],
+    coverage: np.ndarray,
+    base_range: float,
+    overlap: float,
+    positions: np.ndarray,
+) -> None:
+    if not neighbor_sets:
+        return
+    n = len(neighbor_sets)
+    visited = set()
+    components: List[List[int]] = []
+    for idx in range(n):
+        if idx in visited:
+            continue
+        stack = [idx]
+        comp: List[int] = []
+        while stack:
+            node = stack.pop()
+            if node in visited:
+                continue
+            visited.add(node)
+            comp.append(node)
+            stack.extend(neighbor_sets[node])
+        components.append(comp)
+    if len(components) <= 1:
+        return
+    base_idx = 0 if n else None
+    base_comp = None
+    for comp in components:
+        if base_idx is not None and base_idx in comp:
+            base_comp = comp
+            break
+    if base_comp is None:
+        base_comp = components[0]
+    base_set = set(base_comp)
+    for comp in components:
+        if base_set.issuperset(comp):
+            continue
+        best_pair = None
+        best_dist = float("inf")
+        for node in comp:
+            for anchor in base_set:
+                dist = float(np.linalg.norm(positions[node] - positions[anchor]))
+                if dist < best_dist:
+                    best_dist = dist
+                    best_pair = (node, anchor)
+        if not best_pair:
+            continue
+        node, anchor = best_pair
+        allowed = _link_limit(node, anchor, coverage, base_range, overlap)
+        if allowed <= 0.0:
+            continue
+        neighbor_sets[node].add(anchor)
+        neighbor_sets[anchor].add(node)
+        limit_maps[node][anchor] = allowed
+        limit_maps[anchor][node] = allowed
+        base_set.update(comp)
+
+
+
+def _importance_density(points: np.ndarray, targets: List[Target]) -> np.ndarray:
+    density = np.ones(points.shape[0])
+    if not targets:
+        return density
+    sigma_sq = max(_VORONOI_DENSITY_SIGMA, 1.0) ** 2
+    inv_two_sigma = -0.5 / sigma_sq
+    for target in targets:
+        delta = points - np.array(target.pos, dtype=float)
+        dist_sq = np.sum(delta * delta, axis=1)
+        density += np.exp(dist_sq * inv_two_sigma)
+    return density
+
+
+def _filter_points_by_obstacles(
+    points: np.ndarray, obstacles: List[Obstacle]
+) -> np.ndarray:
+    if not obstacles:
+        return np.ones(points.shape[0], dtype=bool)
+    mask = np.ones(points.shape[0], dtype=bool)
+    for obstacle in obstacles:
+        inflated = float(obstacle.R) + _VORONOI_OBS_MARGIN
+        delta = points - np.array(obstacle.c, dtype=float)
+        dist_sq = np.sum(delta * delta, axis=1)
+        mask &= dist_sq >= inflated * inflated
+    return mask
+
+
+def _ensure_sample_points(world: World, resolution: float) -> np.ndarray:
+    cache = _voronoi_samples_cache
+    bounds = (
+        float(world.xmin),
+        float(world.xmax),
+        float(world.ymin),
+        float(world.ymax),
+    )
+    if (
+        cache["points"] is not None
+        and cache["bounds"] == bounds
+        and cache["resolution"] == resolution
+    ):
+        return cache["points"]
+    if resolution <= 0.0:
+        return np.empty((0, 2))
+    xmin, xmax, ymin, ymax = bounds
+    if xmax <= xmin or ymax <= ymin:
+        return np.empty((0, 2))
+    xs = np.arange(xmin + 0.5 * resolution, xmax, resolution)
+    ys = np.arange(ymin + 0.5 * resolution, ymax, resolution)
+    if xs.size == 0:
+        xs = np.array([(xmin + xmax) * 0.5])
+    if ys.size == 0:
+        ys = np.array([(ymin + ymax) * 0.5])
+    grid_x, grid_y = np.meshgrid(xs, ys)
+    points = np.stack((grid_x.ravel(), grid_y.ravel()), axis=1)
+    cache["bounds"] = bounds
+    cache["resolution"] = resolution
+    cache["points"] = points
+    return points
 
 
 def numeric_grad(
@@ -648,9 +996,7 @@ def _evaluate_term(
                     ),
                     "neighbor_gate": float(
                         1.0
-                        if chain_links
-                        and idx in chain_links
-                        and j in chain_links[idx]
+                        if chain_links and idx in chain_links and j in chain_links[idx]
                         else 0.0
                     ),
                 }
