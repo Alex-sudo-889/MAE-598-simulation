@@ -59,7 +59,12 @@ def density_grid(box: Tuple[float, float, float, float], spacing: float) -> np.n
     return np.stack((grid_x.ravel(), grid_y.ravel()), axis=1).astype(np.float32)
 
 
-def spawn_position(world: World, base: np.ndarray, order_idx: int, coverage_radius: float) -> np.ndarray:
+def sequential_spawn_position(
+    world: World,
+    base: np.ndarray,
+    order_idx: int,
+    coverage_radius: float,
+) -> np.ndarray:
     center_y = 0.5 * (world.ymin + world.ymax)
     if order_idx == 0:
         offset = np.array([coverage_radius * 1.5, 0.0], dtype=np.float32)
@@ -68,6 +73,24 @@ def spawn_position(world: World, base: np.ndarray, order_idx: int, coverage_radi
     x = min(x, world.xmax - coverage_radius)
     direction = -1 if order_idx % 2 == 0 else 1
     band = ((order_idx // 2) % 3) + 1
-    y_offset = direction * coverage_radius * (0.4 + 0.2 * band)
+    y_offset = direction * coverage_radius * (0.35 + 0.12 * band)
     y = np.clip(center_y + y_offset, world.ymin + coverage_radius, world.ymax - coverage_radius)
     return np.array([x, y], dtype=np.float32)
+
+
+def cluster_spawn_position(
+    world: World,
+    base: np.ndarray,
+    order_idx: int,
+    coverage_radius: float,
+    base_radius: float,
+) -> np.ndarray:
+    stride = min(base_radius * 0.18, coverage_radius * 0.35)
+    x_offset = min(stride * (order_idx + 1), base_radius * 0.85)
+    direction = -1 if order_idx % 2 == 0 else 1
+    band = ((order_idx // 2) % 3) + 1
+    y_offset = direction * (coverage_radius * 0.12 + band * coverage_radius * 0.05)
+    pos = np.array(base, dtype=np.float32) + np.array([x_offset, y_offset], dtype=np.float32)
+    pos[0] = np.clip(pos[0], world.xmin + coverage_radius * 0.5, world.xmax - coverage_radius)
+    pos[1] = np.clip(pos[1], world.ymin + coverage_radius, world.ymax - coverage_radius)
+    return pos

@@ -30,8 +30,9 @@ def _compute_centroids(positions: jnp.ndarray, active: jnp.ndarray, params: SimP
     ownership = jax.nn.one_hot(assignment, positions.shape[0], dtype=positions.dtype)
     counts = jnp.sum(ownership, axis=0, keepdims=True)
     sums = ownership.T @ points
-    counts = jnp.where(counts <= 0.0, 1.0, counts)
-    centroids = sums / counts.T
+    centroids = sums / jnp.where(counts.T <= 0.0, 1.0, counts.T)
+    active_counts = counts.T > 0.5
+    centroids = jnp.where(active_counts, centroids, positions)
     return centroids
 
 

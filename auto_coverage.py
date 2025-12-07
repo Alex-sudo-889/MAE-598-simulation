@@ -16,7 +16,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 import controls
-from sim import World, coverage_box, density_grid, load_world, spawn_position
+from sim import (
+    World,
+    cluster_spawn_position,
+    coverage_box,
+    density_grid,
+    load_world,
+    sequential_spawn_position,
+)
 
 DATA_ROOT = Path(__file__).resolve().parents[1] / "docs" / "data"
 DEFAULT_DT = 0.05
@@ -221,19 +228,40 @@ def auto_run(
     sim_time = 0.0
     coverage_reached = None
     per_robot = np.zeros(total_slots)
+    if args.spawn_all:
+        for spawn_idx in range(args.max_robots):
+            slot = spawn_idx + 1
+            spawn_pos = cluster_spawn_position(
+                world,
+                base_pos,
+                spawn_idx,
+                args.coverage_radius,
+                BASE_RADIUS,
+            )
+            state = {
+                "positions": state["positions"].at[slot].set(jnp.array(spawn_pos, dtype=jnp.float32)),
+                "active": state["active"].at[slot].set(True),
+            }
+        deploy_count = args.max_robots
     frame_states: List[np.ndarray] = []
     frame_interval = 1.0 / max(args.video_fps, 1e-6) if args.video_fps > 0.0 else None
     next_frame_time = frame_interval if frame_interval is not None else None
     if frame_interval is not None:
         frame_states.append(np.array(jax.device_get(state["positions"]), copy=True))
     while sim_time <= args.max_time:
-        if deploy_count < args.max_robots and (sim_time - last_spawn) >= args.spawn_interval:
+        if (
+            not args.spawn_all
+            and deploy_count < args.max_robots
+            and (sim_time - last_spawn) >= args.spawn_interval
+        ):
             prev_positions_np = None
             if frame_interval is not None:
                 prev_positions_np = np.array(jax.device_get(state["positions"]), copy=True)
             slot = deploy_count + 1
             spawn_idx = deploy_count
-            spawn_pos = spawn_position(world, base_pos, spawn_idx, args.coverage_radius)
+            spawn_pos = sequential_spawn_position(
+                world, base_pos, spawn_idx, args.coverage_radius
+            )
             state = {
                 "positions": state["positions"].at[slot].set(jnp.array(spawn_pos, dtype=jnp.float32)),
                 "active": state["active"].at[slot].set(True),
@@ -296,6 +324,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resolution", type=float, default=GRID_RESOLUTION)
     parser.add_argument("--max-robots", type=int, default=DEFAULT_MAX_ROBOTS)
     parser.add_argument("--robot-speed", type=float, default=DEFAULT_ROBOT_SPEED)
+    parser.add_argument(
+        "--spawn-all",
+        action="store_true",
+        help="Spawn all robots at t=0 instead of sequential deployment",
+    )
     parser.add_argument("--video-fps", type=float, default=DEFAULT_VIDEO_FPS)
     parser.add_argument(
         "--video-path",
