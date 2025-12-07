@@ -39,6 +39,7 @@ BOX_HEIGHT = 680.0
 GRID_RESOLUTION = 25.0
 BASE_RADIUS = 260.0
 SPAWN_TRANSITION_STEPS = 4
+REDUNDANCY_GAIN = 1.0
 
 
 @dataclass
@@ -198,6 +199,11 @@ def auto_run(
     world = load_world()
     box = coverage_box(world, BOX_WIDTH, BOX_HEIGHT)
     base_pos = base_position(world)
+    coverage_center = np.array(
+        [0.5 * (box[0] + box[1]), 0.5 * (box[2] + box[3])], dtype=np.float32
+    )
+    box_min = np.array([box[0], box[2]], dtype=np.float32)
+    box_max = np.array([box[1], box[3]], dtype=np.float32)
     grid = density_grid(box, args.resolution)
     spacing = max(args.coverage_radius * 0.8, args.resolution)
     bridge = bridge_points(base_pos, box, spacing)
@@ -208,6 +214,8 @@ def auto_run(
         world_min=jnp.array([world.xmin, world.ymin], dtype=jnp.float32),
         world_max=jnp.array([world.xmax, world.ymax], dtype=jnp.float32),
         base_position=jnp.array(base_pos, dtype=jnp.float32),
+        box_min=jnp.array(box_min, dtype=jnp.float32),
+        box_max=jnp.array(box_max, dtype=jnp.float32),
         coverage_radius=float(args.coverage_radius),
         body_radius=float(args.coverage_radius) * 0.08,
         dt=float(args.dt),
@@ -216,6 +224,8 @@ def auto_run(
         robot_speed=float(args.robot_speed),
         desired_gap=float(args.coverage_radius) * 0.95,
         max_gap=float(args.coverage_radius) * 1.9,
+        box_gain=0.9,
+        redundancy_gain=REDUNDANCY_GAIN,
     )
     total_slots = args.max_robots + 1
     state = {
@@ -237,6 +247,7 @@ def auto_run(
                 spawn_idx,
                 args.coverage_radius,
                 BASE_RADIUS,
+                coverage_center,
             )
             state = {
                 "positions": state["positions"].at[slot].set(jnp.array(spawn_pos, dtype=jnp.float32)),

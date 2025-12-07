@@ -11,6 +11,8 @@ class SimParams(NamedTuple):
     world_min: jnp.ndarray
     world_max: jnp.ndarray
     base_position: jnp.ndarray
+    box_min: jnp.ndarray
+    box_max: jnp.ndarray
     coverage_radius: float
     body_radius: float
     dt: float
@@ -19,27 +21,51 @@ class SimParams(NamedTuple):
     robot_speed: float
     desired_gap: float
     max_gap: float
+    box_gain: float
+    redundancy_gain: float
 
 
-def _compute_centroids(positions: jnp.ndarray, active: jnp.ndarray, params: SimParams) -> jnp.ndarray:
+def _pairwise_distances(positions: jnp.ndarray, params: SimParams) -> tuple[jnp.ndarray, jnp.ndarray]:
     points = params.coverage_grid
     diffs = points[:, None, :] - positions[None, :, :]
     dist_sq = jnp.sum(diffs * diffs, axis=-1)
-    dist_sq = jnp.where(active[None, :], dist_sq, 1.0e12)
-    assignment = jnp.argmin(dist_sq, axis=1)
+    return points, dist_sq
+
+
+def _coverage_stats(
+    positions: jnp.ndarray, active: jnp.ndarray, params: SimParams
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    points, dist_sq = _pairwise_distances(positions, params)
+    mask = jnp.logical_and(dist_sq <= (params.coverage_radius ** 2), active[None, :])
+    masked_dist = jnp.where(active[None, :], dist_sq, 1.0e12)
+    assignment = jnp.argmin(masked_dist, axis=1)
     ownership = jax.nn.one_hot(assignment, positions.shape[0], dtype=positions.dtype)
     counts = jnp.sum(ownership, axis=0, keepdims=True)
     sums = ownership.T @ points
     centroids = sums / jnp.where(counts.T <= 0.0, 1.0, counts.T)
     active_counts = counts.T > 0.5
     centroids = jnp.where(active_counts, centroids, positions)
-    return centroids
+    return centroids, mask
+
+
+def _redundancy_weights(mask: jnp.ndarray, params: SimParams) -> jnp.ndarray:
+    mask_f = mask.astype(jnp.float32)
+    coverage_hits = jnp.sum(mask_f, axis=0)
+    share_counts = jnp.sum(mask_f, axis=1, keepdims=True)
+    normalized = jnp.where(share_counts > 0.5, mask_f / share_counts, 0.0)
+    unique_hits = jnp.sum(normalized, axis=0)
+    ratio = jnp.where(coverage_hits > 0.5, unique_hits / (coverage_hits + 1.0e-6), 1.0)
+    redundancy = 1.0 - ratio
+    weights = 1.0 + params.redundancy_gain * redundancy
+    weights = weights.at[0].set(0.0)
+    return weights
 
 
 def _coverage_velocities(positions: jnp.ndarray, active: jnp.ndarray, params: SimParams) -> jnp.ndarray:
-    centroids = _compute_centroids(positions, active, params)
+    centroids, mask = _coverage_stats(positions, active, params)
     drive = centroids - positions
-    return params.coverage_gain * drive
+    weights = _redundancy_weights(mask, params)[:, None]
+    return params.coverage_gain * drive * weights
 
 
 def _link_velocities(positions: jnp.ndarray, params: SimParams) -> jnp.ndarray:
@@ -51,6 +77,13 @@ def _link_velocities(positions: jnp.ndarray, params: SimParams) -> jnp.ndarray:
     link = -direction * gap_error * params.link_gain
     link = link.at[0].set(jnp.zeros(2, dtype=positions.dtype))
     return link
+
+
+def _box_velocities(positions: jnp.ndarray, params: SimParams) -> jnp.ndarray:
+    clip_lo = params.box_min
+    clip_hi = params.box_max
+    clipped = jnp.clip(positions, clip_lo, clip_hi)
+    return (clipped - positions) * params.box_gain
 
 
 def _limit_speed(velocities: jnp.ndarray, params: SimParams) -> jnp.ndarray:
@@ -91,7 +124,8 @@ def _integrate(state: dict, params: SimParams) -> dict:
     active = state["active"]
     coverage_term = _coverage_velocities(pos, active, params)
     link_term = _link_velocities(pos, params)
-    velocities = coverage_term + link_term
+    box_term = _box_velocities(pos, params)
+    velocities = coverage_term + link_term + box_term
     velocities = jnp.where(active[:, None], velocities, 0.0)
     velocities = velocities.at[0].set(jnp.zeros(2, dtype=velocities.dtype))
     velocities = _limit_speed(velocities, params)
@@ -108,9 +142,7 @@ step_state = jax.jit(_integrate)
 def coverage_metrics(state: dict, params: SimParams) -> tuple[jnp.ndarray, jnp.ndarray]:
     pos = state["positions"]
     active = state["active"]
-    points = params.coverage_grid
-    diffs = points[:, None, :] - pos[None, :, :]
-    dist_sq = jnp.sum(diffs * diffs, axis=-1)
+    points, dist_sq = _pairwise_distances(pos, params)
     within = dist_sq <= (params.coverage_radius ** 2)
     mask = jnp.logical_and(within, active[None, :])
     covered = jnp.any(mask, axis=1)

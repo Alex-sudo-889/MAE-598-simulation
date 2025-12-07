@@ -84,13 +84,27 @@ def cluster_spawn_position(
     order_idx: int,
     coverage_radius: float,
     base_radius: float,
+    target_point: np.ndarray,
 ) -> np.ndarray:
-    stride = min(base_radius * 0.18, coverage_radius * 0.35)
-    x_offset = min(stride * (order_idx + 1), base_radius * 0.85)
-    direction = -1 if order_idx % 2 == 0 else 1
-    band = ((order_idx // 2) % 3) + 1
-    y_offset = direction * (coverage_radius * 0.12 + band * coverage_radius * 0.05)
-    pos = np.array(base, dtype=np.float32) + np.array([x_offset, y_offset], dtype=np.float32)
+    base_vec = np.array(base, dtype=np.float32)
+    direction = np.array(target_point, dtype=np.float32) - base_vec
+    norm = np.linalg.norm(direction)
+    if norm < 1.0e-6:
+        direction = np.array([1.0, 0.0], dtype=np.float32)
+    else:
+        direction = direction / norm
+    perp = np.array([-direction[1], direction[0]], dtype=np.float32)
+    max_dist = base_radius * 0.92
+    growth = 1.0 - np.exp(-0.55 * (order_idx + 1))
+    radial_dist = np.clip(growth * max_dist, base_radius * 0.15, max_dist)
+    lane_cycle = (order_idx % 3) - 1
+    lane_width = min(coverage_radius * 0.18, base_radius * 0.25)
+    lateral_offset = lane_cycle * lane_width * 0.35
+    pos = base_vec + direction * radial_dist + perp * lateral_offset
+    offset = pos - base_vec
+    dist = np.linalg.norm(offset)
+    if dist > max_dist:
+        pos = base_vec + offset / (dist + 1.0e-6) * max_dist
     pos[0] = np.clip(pos[0], world.xmin + coverage_radius * 0.5, world.xmax - coverage_radius)
     pos[1] = np.clip(pos[1], world.ymin + coverage_radius, world.ymax - coverage_radius)
     return pos
