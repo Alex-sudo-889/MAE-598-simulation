@@ -1,0 +1,216 @@
+[
+  {
+    "name": "go_to",
+    "label": "Go To",
+    "description": "Disabled (no waypoint attraction)",
+    "weight": 0.0,
+    "active": false,
+    "kind": "single",
+    "vx": "0.0",
+    "vy": "0.0",
+    "condition": "",
+    "potential": "",
+    "constants": {}
+  },
+  {
+    "name": "coverage_density",
+    "label": "Coverage Field",
+    "description": "Disabled demand field (uniform coverage)",
+    "weight": 0.0,
+    "active": false,
+    "kind": "potential",
+    "vx": "0.0",
+    "vy": "0.0",
+    "condition": "",
+    "potential": "0.0",
+    "constants": {}
+  },
+  {
+    "name": "frontier_flow",
+    "label": "Frontier Push",
+    "description": "Global drift from staging edge toward uncovered frontier",
+    "weight": 0.9,
+    "active": true,
+    "kind": "single",
+    "vx": "flow_gain * clamp(1.0 - ((x - base_x) / max((xmax - xmin), 1.0)), 0.0, 1.0)",
+    "vy": "0.0",
+    "condition": "",
+    "potential": "",
+    "constants": {
+      "flow_gain": 40.0,
+      "base_x": 170.0
+    }
+  },
+  {
+    "name": "base_link",
+    "label": "Base Anchor",
+    "description": "Keeps a designated robot locked to the base perimeter",
+    "weight": 0.9,
+    "active": true,
+    "kind": "single",
+    "vx": "(idx == base_guard_idx) * (-anchor_gain) * ((sqrt((x - base_x)**2 + (y - base_y)**2) - (base_radius + coverage_radius)) * ((x - base_x) / max(sqrt((x - base_x)**2 + (y - base_y)**2), 1.0)))",
+    "vy": "(idx == base_guard_idx) * (-anchor_gain) * ((sqrt((x - base_x)**2 + (y - base_y)**2) - (base_radius + coverage_radius)) * ((y - base_y) / max(sqrt((x - base_x)**2 + (y - base_y)**2), 1.0)))",
+    "condition": "",
+    "potential": "",
+    "constants": {
+      "base_radius": 260.0,
+      "base_x": 170.0,
+      "base_y": 380.0,
+      "anchor_gain": 1.4,
+      "base_guard_idx": 0.0
+    }
+  },
+  {
+    "name": "base_cover",
+    "label": "Base Coverage Buffer",
+    "description": "Repels robots when they overlap the base coverage disc",
+    "weight": 1.0,
+    "active": true,
+    "kind": "single",
+    "vx": "(1.0 - (idx == base_guard_idx)) * (sqrt((x - base_x)**2 + (y - base_y)**2) < base_cover_radius) * rep_gain * ((x - base_x) / max(sqrt((x - base_x)**2 + (y - base_y)**2), 1.0))",
+    "vy": "(1.0 - (idx == base_guard_idx)) * (sqrt((x - base_x)**2 + (y - base_y)**2) < base_cover_radius) * rep_gain * ((y - base_y) / max(sqrt((x - base_x)**2 + (y - base_y)**2), 1.0))",
+    "condition": "",
+    "potential": "",
+    "constants": {
+      "base_cover_radius": 260.0,
+      "base_x": 170.0,
+      "base_y": 380.0,
+      "base_guard_idx": 0.0,
+      "rep_gain": 120.0
+    }
+  },
+  {
+    "name": "avoid_obs",
+    "label": "Avoid Obst",
+    "description": "Hard wall push near obstacles",
+    "weight": 0.9,
+    "active": true,
+    "kind": "obstacle",
+    "vx": "(dist < radius + infl) * k * (dx / (dist + soft_dir)) / ((max(dist - radius, 0.0) + soft_gap)**2)",
+    "vy": "(dist < radius + infl) * k * (dy / (dist + soft_dir)) / ((max(dist - radius, 0.0) + soft_gap)**2)",
+    "condition": "dist < radius + infl",
+    "potential": "",
+    "constants": {
+      "k": 320000.0,
+      "infl": 120.0,
+      "soft_dir": 1.0,
+      "soft_gap": 6.0
+    }
+  },
+  {
+    "name": "avoid_robots",
+    "label": "Separation",
+    "description": "Coverage-aware separation (inverse-square push)",
+    "weight": 1.1,
+    "active": true,
+    "kind": "robots",
+    "vx": "k * exp(-max(dist - max(sum_radius + body_margin, (coverage_radius + other_coverage_radius) * spacing_scale), 0.0) / rep_decay) * (dx / max(dist, 1.0)) / max((coverage_radius + other_coverage_radius), 1.0)",
+    "vy": "k * exp(-max(dist - max(sum_radius + body_margin, (coverage_radius + other_coverage_radius) * spacing_scale), 0.0) / rep_decay) * (dy / max(dist, 1.0)) / max((coverage_radius + other_coverage_radius), 1.0)",
+    "condition": "dist < (max(sum_radius + body_margin, (coverage_radius + other_coverage_radius) * spacing_scale) + rep_margin)",
+    "potential": "",
+    "constants": {
+      "k": 640000.0,
+      "rep_decay": 14.0,
+      "rep_margin": 8.0,
+      "spacing_scale": 1.0,
+      "body_margin": 10.0
+    }
+  },
+  {
+    "name": "chain_tension",
+    "label": "Chain Tension",
+    "description": "Maintains communication-distance contact between neighbors",
+    "weight": 0.85,
+    "active": true,
+    "kind": "robots",
+    "vx": "neighbor_gate * chain_gain * clamp(((coverage_radius + other_coverage_radius) - dist) / max((coverage_radius + other_coverage_radius), 1.0), -1.0, 1.0) * (dx / max(dist, 1.0))",
+    "vy": "neighbor_gate * chain_gain * clamp(((coverage_radius + other_coverage_radius) - dist) / max((coverage_radius + other_coverage_radius), 1.0), -1.0, 1.0) * (dy / max(dist, 1.0))",
+    "condition": "",
+    "potential": "",
+    "constants": {
+      "chain_gain": 120.0
+    }
+  },
+  {
+    "name": "obstacle_slide",
+    "label": "Obstacle Slide",
+    "description": "Adds tangential drift to steer robots around obstacles",
+    "weight": 0.4,
+    "active": true,
+    "kind": "obstacle",
+    "vx": "slide_gain * (((y >= base_y) * 2.0 - 1.0)) * (-(dy) / max(dist, 1.0)) * (dist < radius + slide_margin)",
+    "vy": "slide_gain * (((y >= base_y) * 2.0 - 1.0)) * (dx / max(dist, 1.0)) * (dist < radius + slide_margin)",
+    "condition": "",
+    "potential": "",
+    "constants": {
+      "slide_gain": 240.0,
+      "slide_margin": 80.0,
+      "base_y": 380.0
+    }
+  },
+  {
+    "name": "global_spread",
+    "label": "Global Spread",
+    "description": "Slow drift toward uncovered frontier while respecting base radius",
+    "weight": 0.35,
+    "active": true,
+    "kind": "single",
+    "vx": "spread_gain * clamp((x - base_x) / max((xmax - xmin), 1.0), 0.0, 1.0)",
+    "vy": "spread_gain * clamp(((y - ((ymax + ymin) / 2.0)) / max((ymax - ymin), 1.0)), -0.6, 0.6)",
+    "condition": "",
+    "potential": "",
+    "constants": {
+      "spread_gain": 35.0,
+      "base_x": 170.0
+    }
+  },
+  {
+    "name": "bounds",
+    "label": "Bounds",
+    "description": "Push inward near world edges",
+    "weight": 0.6,
+    "active": true,
+    "kind": "single",
+    "vx": "(dist_left < margin) * k * (margin - dist_left) / margin - (dist_right < margin) * k * (margin - dist_right) / margin",
+    "vy": "(dist_bottom < margin) * k * (margin - dist_bottom) / margin - (dist_top < margin) * k * (margin - dist_top) / margin",
+    "condition": "",
+    "potential": "",
+    "constants": {
+      "k": 260.0,
+      "margin": 80.0
+    }
+  },
+  {
+    "name": "phi",
+    "label": "Phi",
+    "description": "Gradient descent on custom potential field",
+    "weight": 0.3,
+    "active": false,
+    "kind": "potential",
+    "vx": "0.0",
+    "vy": "0.0",
+    "condition": "",
+    "potential": "(x - cx)**2 + (y - cy)**2",
+    "constants": {
+      "cx": 0.0,
+      "cy": 0.0
+    }
+  },
+  {
+    "name": "swirl",
+    "label": "Swirl Field",
+    "description": "Example custom term that orbits the world center",
+    "weight": 0.4,
+    "active": false,
+    "kind": "single",
+    "vx": "swirl_gain * (-(y - cy))",
+    "vy": "swirl_gain * (x - cx)",
+    "condition": "",
+    "potential": "",
+    "constants": {
+      "cx": 540.0,
+      "cy": 380.0,
+      "swirl_gain": 0.04
+    }
+  }
+]
