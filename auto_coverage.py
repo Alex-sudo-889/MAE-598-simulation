@@ -130,6 +130,23 @@ def plot_final(
     plt.close(fig)
 
 
+def plot_coverage_history(run_dir: Path, entries: List[CoverageLogEntry]) -> None:
+    if not entries:
+        return
+    times = np.array([entry.time_s for entry in entries], dtype=float)
+    coverage = np.array([entry.coverage_fraction for entry in entries], dtype=float)
+    fig, ax = plt.subplots(figsize=(7.5, 4.0))
+    ax.plot(times, coverage, color="tab:blue", linewidth=2.0)
+    ax.set_xlabel("Time [s]")
+    ax.set_ylabel("Coverage fraction")
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(True, alpha=0.25)
+    ax.set_title("Coverage vs time")
+    fig.tight_layout()
+    fig.savefig(run_dir / "coverage_history.png", dpi=200)
+    plt.close(fig)
+
+
 def write_log(run_dir: Path, entries: List[CoverageLogEntry]) -> None:
     path = run_dir / "coverage_log.csv"
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -357,6 +374,7 @@ def main() -> None:
     write_log(run_dir, entries)
     save_summary(run_dir, summary)
     plot_final(run_dir, world, box, final_positions, args.coverage_radius, base_pos)
+    plot_coverage_history(run_dir, entries)
     video_path = Path(args.video_path) if args.video_path else run_dir / "coverage.mp4"
     if args.video_fps > 0.0:
         write_video(run_dir, world, box, base_pos, frames, args.coverage_radius, args.video_fps, video_path)
