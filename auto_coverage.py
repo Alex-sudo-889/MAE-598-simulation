@@ -31,6 +31,7 @@ BOX_WIDTH = 960.0
 BOX_HEIGHT = 680.0
 GRID_RESOLUTION = 25.0
 BASE_RADIUS = 260.0
+SPAWN_TRANSITION_STEPS = 4
 
 
 @dataclass
@@ -112,7 +113,7 @@ def plot_final(
     base_pos: np.ndarray,
 ) -> None:
     fig, ax = plt.subplots(figsize=(9, 5.5))
-    ax.set_title("Final coverage state (JAX core)")
+    ax.set_title("Final coverage state")
     render_frame(ax, world, box, base_pos, positions, coverage_radius)
     xmin, xmax, ymin, ymax = box
     ax.legend(loc="upper right")
@@ -173,6 +174,17 @@ def write_video(
         subprocess.run(cmd, check=True)
 
 
+def add_spawn_transition(
+    frame_states: List[np.ndarray],
+    previous: np.ndarray,
+    updated: np.ndarray,
+) -> None:
+    for step in range(1, SPAWN_TRANSITION_STEPS + 1):
+        alpha = step / float(SPAWN_TRANSITION_STEPS + 1)
+        interp = previous + (updated - previous) * alpha
+        frame_states.append(interp.copy())
+
+
 def auto_run(
     args: argparse.Namespace,
 ) -> tuple[List[CoverageLogEntry], dict, np.ndarray, List[np.ndarray], World, Tuple[float, float, float, float], np.ndarray]:
@@ -211,12 +223,14 @@ def auto_run(
     per_robot = np.zeros(total_slots)
     frame_states: List[np.ndarray] = []
     frame_interval = 1.0 / max(args.video_fps, 1e-6) if args.video_fps > 0.0 else None
-    next_frame_time = 0.0
+    next_frame_time = frame_interval if frame_interval is not None else None
     if frame_interval is not None:
-        frame_states.append(np.array(jax.device_get(state["positions"])))
-        next_frame_time = frame_interval
+        frame_states.append(np.array(jax.device_get(state["positions"]), copy=True))
     while sim_time <= args.max_time:
         if deploy_count < args.max_robots and (sim_time - last_spawn) >= args.spawn_interval:
+            prev_positions_np = None
+            if frame_interval is not None:
+                prev_positions_np = np.array(jax.device_get(state["positions"]), copy=True)
             slot = deploy_count + 1
             spawn_idx = deploy_count
             spawn_pos = spawn_position(world, base_pos, spawn_idx, args.coverage_radius)
@@ -224,6 +238,10 @@ def auto_run(
                 "positions": state["positions"].at[slot].set(jnp.array(spawn_pos, dtype=jnp.float32)),
                 "active": state["active"].at[slot].set(True),
             }
+            if prev_positions_np is not None:
+                updated_positions = prev_positions_np.copy()
+                updated_positions[slot] = spawn_pos
+                add_spawn_transition(frame_states, prev_positions_np, updated_positions)
             deploy_count += 1
             last_spawn = sim_time
         state = controls.step_state(state, params)
@@ -233,11 +251,14 @@ def auto_run(
         entries.append(CoverageLogEntry(sim_time, total_cov, deploy_count))
         if coverage_reached is None and total_cov >= args.threshold:
             coverage_reached = sim_time
-        if frame_interval is not None and sim_time >= next_frame_time:
-            frame_states.append(np.array(jax.device_get(state["positions"])))
-            next_frame_time += frame_interval
+        if frame_interval is not None and next_frame_time is not None:
+            while sim_time + 1e-9 >= next_frame_time:
+                frame_states.append(np.array(jax.device_get(state["positions"]), copy=True))
+                next_frame_time += frame_interval
         sim_time += args.dt
     final_positions = np.array(jax.device_get(state["positions"]))
+    if frame_interval is not None:
+        frame_states.append(final_positions.copy())
     world_area = (world.xmax - world.xmin) * (world.ymax - world.ymin)
     box_area = (box[1] - box[0]) * (box[3] - box[2])
     summary = {
