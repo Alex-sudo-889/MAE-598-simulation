@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -17,19 +18,64 @@ class World:
     ymax: float
 
 
-def load_world() -> World:
-    if SCENE_PATH.exists():
-        import json
+@dataclass
+class Scene:
+    world: World
+    goal_boxes: List[Tuple[float, float, float, float]]
+    obstacles: np.ndarray
 
-        payload = json.loads(SCENE_PATH.read_text())
-        world = payload.get("world", {})
-        return World(
-            float(world.get("xmin", 0.0)),
-            float(world.get("xmax", 2000.0)),
-            float(world.get("ymin", 0.0)),
-            float(world.get("ymax", 1200.0)),
-        )
-    return World(40.0, 2440.0, 40.0, 1540.0)
+
+def _parse_world(payload: dict) -> World:
+    world = payload.get("world", {})
+    return World(
+        float(world.get("xmin", 40.0)),
+        float(world.get("xmax", 2440.0)),
+        float(world.get("ymin", 40.0)),
+        float(world.get("ymax", 1540.0)),
+    )
+
+
+def _parse_goal_boxes(payload: dict) -> List[Tuple[float, float, float, float]]:
+    boxes = []
+    for item in payload.get("goal_boxes", []):
+        try:
+            xmin = float(item.get("xmin"))
+            xmax = float(item.get("xmax"))
+            ymin = float(item.get("ymin"))
+            ymax = float(item.get("ymax"))
+        except (TypeError, ValueError):
+            continue
+        boxes.append((xmin, xmax, ymin, ymax))
+    return boxes
+
+
+def _parse_obstacles(payload: dict) -> np.ndarray:
+    obs = []
+    for entry in payload.get("obstacles", []):
+        center = entry.get("c") or entry.get("center")
+        if not center or len(center) != 2:
+            continue
+        radius = float(entry.get("R", entry.get("radius", 0.0)))
+        obs.append([float(center[0]), float(center[1]), radius])
+    if not obs:
+        return np.zeros((0, 3), dtype=np.float32)
+    return np.array(obs, dtype=np.float32)
+
+
+def load_scene(path: Optional[Path] = None) -> Scene:
+    scene_path = path or SCENE_PATH
+    if scene_path.exists():
+        payload = json.loads(scene_path.read_text())
+    else:
+        payload = {}
+    world = _parse_world(payload)
+    boxes = _parse_goal_boxes(payload)
+    obstacles = _parse_obstacles(payload)
+    return Scene(world=world, goal_boxes=boxes, obstacles=obstacles)
+
+
+def load_world() -> World:
+    return load_scene().world
 
 
 def coverage_box(world: World, width: float, height: float) -> Tuple[float, float, float, float]:

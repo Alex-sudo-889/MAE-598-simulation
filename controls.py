@@ -13,6 +13,8 @@ class SimParams(NamedTuple):
     base_position: jnp.ndarray
     box_min: jnp.ndarray
     box_max: jnp.ndarray
+    obstacle_centers: jnp.ndarray
+    obstacle_radii: jnp.ndarray
     coverage_radius: float
     body_radius: float
     dt: float
@@ -23,6 +25,9 @@ class SimParams(NamedTuple):
     max_gap: float
     box_gain: float
     redundancy_gain: float
+    obstacle_margin: float
+    obstacle_gain: float
+    obstacle_soft: float
 
 
 def _pairwise_distances(positions: jnp.ndarray, params: SimParams) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -86,6 +91,22 @@ def _box_velocities(positions: jnp.ndarray, params: SimParams) -> jnp.ndarray:
     return (clipped - positions) * params.box_gain
 
 
+def _obstacle_velocities(positions: jnp.ndarray, params: SimParams) -> jnp.ndarray:
+    centers = params.obstacle_centers
+    if centers.size == 0:
+        return jnp.zeros_like(positions)
+    radii = params.obstacle_radii
+    delta = positions[:, None, :] - centers[None, :, :]
+    dist = jnp.linalg.norm(delta, axis=-1)
+    direction = jnp.where(dist[..., None] > 1.0e-6, delta / (dist[..., None] + 1.0e-6), 0.0)
+    influence = radii[None, :] + params.obstacle_margin
+    penetration = jnp.clip(influence - dist, 0.0, None)
+    scale = params.obstacle_gain * (penetration / (params.obstacle_margin + 1.0e-6))
+    falloff = scale / (dist + params.obstacle_soft)
+    forces = falloff[..., None] * direction
+    return jnp.sum(forces, axis=1)
+
+
 def _limit_speed(velocities: jnp.ndarray, params: SimParams) -> jnp.ndarray:
     speed = jnp.linalg.norm(velocities, axis=1, keepdims=True)
     factor = jnp.where(
@@ -125,7 +146,8 @@ def _integrate(state: dict, params: SimParams) -> dict:
     coverage_term = _coverage_velocities(pos, active, params)
     link_term = _link_velocities(pos, params)
     box_term = _box_velocities(pos, params)
-    velocities = coverage_term + link_term + box_term
+    obstacle_term = _obstacle_velocities(pos, params)
+    velocities = coverage_term + link_term + box_term + obstacle_term
     velocities = jnp.where(active[:, None], velocities, 0.0)
     velocities = velocities.at[0].set(jnp.zeros(2, dtype=velocities.dtype))
     velocities = _limit_speed(velocities, params)

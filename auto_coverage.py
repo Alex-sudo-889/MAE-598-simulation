@@ -17,11 +17,12 @@ import numpy as np
 
 import controls
 from sim import (
+    SCENE_PATH,
     World,
     cluster_spawn_position,
     coverage_box,
     density_grid,
-    load_world,
+    load_scene,
     sequential_spawn_position,
 )
 
@@ -40,6 +41,9 @@ GRID_RESOLUTION = 25.0
 BASE_RADIUS = 260.0
 SPAWN_TRANSITION_STEPS = 4
 REDUNDANCY_GAIN = 1.0
+OBSTACLE_MARGIN = 140.0
+OBSTACLE_GAIN = 340000.0
+OBSTACLE_SOFT = 25.0
 
 
 @dataclass
@@ -83,10 +87,25 @@ def bridge_points(
     return np.array(points, dtype=np.float32)
 
 
+def resolve_scene_path(scene_arg: str | None) -> Path:
+    if not scene_arg:
+        return SCENE_PATH
+    script_dir = Path(__file__).resolve().parent
+    candidate = Path(scene_arg).expanduser()
+    search: List[Path] = [candidate]
+    if not candidate.is_absolute():
+        search.append(script_dir / candidate)
+        search.append(script_dir / Path(scene_arg).name)
+    for path in search:
+        if path.exists():
+            return path
+    return candidate
+
+
 def render_frame(
     ax: plt.Axes,
     world: World,
-    box: Tuple[float, float, float, float],
+    boxes: List[Tuple[float, float, float, float]],
     base_pos: np.ndarray,
     positions: np.ndarray,
     coverage_radius: float,
@@ -94,10 +113,11 @@ def render_frame(
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlim(world.xmin, world.xmax)
     ax.set_ylim(world.ymin, world.ymax)
-    xmin, xmax, ymin, ymax = box
-    ax.add_patch(
-        plt.Rectangle((xmin, ymin), xmax - xmin, ymax - ymin, color="#7fcdbb", alpha=0.2, linewidth=1.8)
-    )
+    for box in boxes:
+        xmin, xmax, ymin, ymax = box
+        ax.add_patch(
+            plt.Rectangle((xmin, ymin), xmax - xmin, ymax - ymin, color="#7fcdbb", alpha=0.2, linewidth=1.8)
+        )
     ax.add_patch(
         plt.Rectangle((world.xmin, world.ymin), world.xmax - world.xmin, world.ymax - world.ymin, fill=False)
     )
@@ -115,15 +135,14 @@ def render_frame(
 def plot_final(
     run_dir: Path,
     world: World,
-    box: tuple[float, float, float, float],
+    boxes: List[tuple[float, float, float, float]],
     positions: np.ndarray,
     coverage_radius: float,
     base_pos: np.ndarray,
 ) -> None:
     fig, ax = plt.subplots(figsize=(9, 5.5))
     ax.set_title("Final coverage state")
-    render_frame(ax, world, box, base_pos, positions, coverage_radius)
-    xmin, xmax, ymin, ymax = box
+    render_frame(ax, world, boxes, base_pos, positions, coverage_radius)
     ax.legend(loc="upper right")
     fig.tight_layout()
     fig.savefig(run_dir / "final_map.png", dpi=200)
@@ -163,7 +182,7 @@ def save_summary(run_dir: Path, payload: dict) -> None:
 def write_video(
     run_dir: Path,
     world: World,
-    box: Tuple[float, float, float, float],
+    boxes: List[Tuple[float, float, float, float]],
     base_pos: np.ndarray,
     frames: List[np.ndarray],
     coverage_radius: float,
@@ -178,7 +197,7 @@ def write_video(
         for idx, positions in enumerate(frames):
             fig, ax = plt.subplots(figsize=(9, 5.5))
             ax.set_title("Swarm deployment")
-            render_frame(ax, world, box, base_pos, positions, coverage_radius)
+            render_frame(ax, world, boxes, base_pos, positions, coverage_radius)
             ax.set_xticks([])
             ax.set_yticks([])
             fig.tight_layout()
@@ -212,20 +231,39 @@ def add_spawn_transition(
 
 def auto_run(
     args: argparse.Namespace,
-) -> tuple[List[CoverageLogEntry], dict, np.ndarray, List[np.ndarray], World, Tuple[float, float, float, float], np.ndarray]:
-    world = load_world()
-    box = coverage_box(world, BOX_WIDTH, BOX_HEIGHT)
+) -> tuple[
+    List[CoverageLogEntry],
+    dict,
+    np.ndarray,
+    List[np.ndarray],
+    World,
+    List[Tuple[float, float, float, float]],
+    np.ndarray,
+]:
+    scene_path = resolve_scene_path(args.scene)
+    scene = load_scene(scene_path)
+    world = scene.world
+    boxes = scene.goal_boxes or [coverage_box(world, BOX_WIDTH, BOX_HEIGHT)]
     base_pos = base_position(world)
-    coverage_center = np.array(
-        [0.5 * (box[0] + box[1]), 0.5 * (box[2] + box[3])], dtype=np.float32
-    )
-    box_min = np.array([box[0], box[2]], dtype=np.float32)
-    box_max = np.array([box[1], box[3]], dtype=np.float32)
-    grid = density_grid(box, args.resolution)
+    centers = np.array([
+        [0.5 * (box[0] + box[1]), 0.5 * (box[2] + box[3])] for box in boxes
+    ])
+    coverage_center = np.mean(centers, axis=0).astype(np.float32)
+    box_min = np.array([min(box[0] for box in boxes), min(box[2] for box in boxes)], dtype=np.float32)
+    box_max = np.array([max(box[1] for box in boxes), max(box[3] for box in boxes)], dtype=np.float32)
+    grid_chunks = [density_grid(box, args.resolution) for box in boxes]
+    grid = np.vstack(grid_chunks)
     spacing = max(args.coverage_radius * 0.8, args.resolution)
-    bridge = bridge_points(base_pos, box, spacing)
+    bridge = bridge_points(base_pos, boxes[0], spacing)
     if bridge.size:
         grid = np.vstack([grid, bridge])
+    obstacles = scene.obstacles
+    if obstacles.size:
+        obstacle_centers = jnp.array(obstacles[:, :2], dtype=jnp.float32)
+        obstacle_radii = jnp.array(obstacles[:, 2], dtype=jnp.float32)
+    else:
+        obstacle_centers = jnp.zeros((0, 2), dtype=jnp.float32)
+        obstacle_radii = jnp.zeros((0,), dtype=jnp.float32)
     params = controls.SimParams(
         coverage_grid=jnp.array(grid, dtype=jnp.float32),
         world_min=jnp.array([world.xmin, world.ymin], dtype=jnp.float32),
@@ -233,6 +271,8 @@ def auto_run(
         base_position=jnp.array(base_pos, dtype=jnp.float32),
         box_min=jnp.array(box_min, dtype=jnp.float32),
         box_max=jnp.array(box_max, dtype=jnp.float32),
+        obstacle_centers=obstacle_centers,
+        obstacle_radii=obstacle_radii,
         coverage_radius=float(args.coverage_radius),
         body_radius=float(args.coverage_radius) * 0.08,
         dt=float(args.dt),
@@ -243,6 +283,9 @@ def auto_run(
         max_gap=float(args.coverage_radius) * 1.9,
         box_gain=0.9,
         redundancy_gain=REDUNDANCY_GAIN,
+        obstacle_margin=OBSTACLE_MARGIN,
+        obstacle_gain=OBSTACLE_GAIN,
+        obstacle_soft=OBSTACLE_SOFT,
     )
     total_slots = args.max_robots + 1
     state = {
@@ -316,7 +359,7 @@ def auto_run(
     if frame_interval is not None:
         frame_states.append(final_positions.copy())
     world_area = (world.xmax - world.xmin) * (world.ymax - world.ymin)
-    box_area = (box[1] - box[0]) * (box[3] - box[2])
+    box_area = sum((b[1] - b[0]) * (b[3] - b[2]) for b in boxes)
     summary = {
         "threshold": args.threshold,
         "coverage_radius_px": args.coverage_radius,
@@ -327,19 +370,23 @@ def auto_run(
         "robots_used": deploy_count,
         "coverage_time_s": coverage_reached,
         "final_coverage": entries[-1].coverage_fraction if entries else 0.0,
-        "coverage_box": {
-            "xmin": box[0],
-            "xmax": box[1],
-            "ymin": box[2],
-            "ymax": box[3],
-            "area_px2": box_area,
-        },
+        "coverage_boxes": [
+            {
+                "xmin": b[0],
+                "xmax": b[1],
+                "ymin": b[2],
+                "ymax": b[3],
+                "area_px2": (b[1] - b[0]) * (b[3] - b[2]),
+            }
+            for b in boxes
+        ],
         "per_robot_area_fraction": per_robot.tolist(),
         "per_robot_area_px2": (per_robot * box_area).tolist(),
         "final_positions": final_positions.tolist(),
         "world_area_px2": world_area,
+        "scene_path": str(scene_path),
     }
-    return entries, summary, final_positions, frame_states, world, box, base_pos
+    return entries, summary, final_positions, frame_states, world, boxes, base_pos
 
 
 def parse_args() -> argparse.Namespace:
@@ -364,20 +411,26 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Optional mp4 output path (default: run directory)",
     )
+    parser.add_argument(
+        "--scene",
+        type=str,
+        default=str(SCENE_PATH),
+        help="Path to scene JSON with world/obstacle/goal definitions",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     run_dir = ensure_run_dir()
-    entries, summary, final_positions, frames, world, box, base_pos = auto_run(args)
+    entries, summary, final_positions, frames, world, boxes, base_pos = auto_run(args)
     write_log(run_dir, entries)
     save_summary(run_dir, summary)
-    plot_final(run_dir, world, box, final_positions, args.coverage_radius, base_pos)
+    plot_final(run_dir, world, boxes, final_positions, args.coverage_radius, base_pos)
     plot_coverage_history(run_dir, entries)
     video_path = Path(args.video_path) if args.video_path else run_dir / "coverage.mp4"
     if args.video_fps > 0.0:
-        write_video(run_dir, world, box, base_pos, frames, args.coverage_radius, args.video_fps, video_path)
+        write_video(run_dir, world, boxes, base_pos, frames, args.coverage_radius, args.video_fps, video_path)
     if summary["coverage_time_s"] is None:
         print("Coverage threshold not reached within allotted time.")
     else:

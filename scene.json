@@ -5,6 +5,9 @@
     "ymin": 40.0,
     "ymax": 1540.0
   },
+  "goal_boxes": [
+    { "xmin": 960.0, "xmax": 1920.0, "ymin": 520.0, "ymax": 1200.0 }
+  ],
   "robots": [
     { "pos": [220.0, 360.0], "r": 14.0, "vmax": 180.0, "coverage_radius": 180.0 },
     { "pos": [260.0, 760.0], "r": 14.0, "vmax": 180.0, "coverage_radius": 180.0 },
